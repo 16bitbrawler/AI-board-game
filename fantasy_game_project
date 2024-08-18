@@ -1,0 +1,192 @@
+import pygame
+import sys
+import random
+import json
+import os
+from langchain_community.llms import Ollama
+from langchain.chains import LLMChain
+from langchain.prompts import PromptTemplate
+
+pygame.init()
+pygame.font.init()
+pygame.mixer.init()
+
+SCREEN_WIDTH = 1024
+SCREEN_HEIGHT = 768
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+
+screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+pygame.display.set_caption("Fantasy Board Game with AI Dungeon Master")
+
+class Location:
+    def __init__(self, name, description, x, y):
+        self.name = name
+        self.description = description
+        self.x = x
+        self.y = y
+        self.connections = {}  # Dictionary of direction: location_name
+        self.choices = []  # List of choices for this location
+
+    def add_connection(self, direction, location_name):
+        self.connections[direction] = location_name
+
+    def set_choices(self, choices):
+        self.choices = choices
+
+class World:
+    def __init__(self):
+        self.locations = {}
+        self.current_location = None
+        self.load_world_data()
+
+    def load_world_data(self):
+        data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'scenarios.json')
+        with open(data_path, 'r') as f:
+            scenarios = json.load(f)
+        
+        for scenario in scenarios:
+            location = Location(scenario['title'], scenario['description'], 0, 0)  # You'll need to add x, y coordinates to your JSON
+            location.set_choices(scenario['choices'])
+            self.locations[scenario['title']] = location
+        
+        # Set up connections (you'll need to add this information to your JSON as well)
+        # This is just an example, adjust according to your actual data
+        for scenario in scenarios:
+            if 'connections' in scenario:
+                for direction, connected_location in scenario['connections'].items():
+                    self.locations[scenario['title']].add_connection(direction, connected_location)
+
+        self.current_location = self.locations[scenarios[0]['title']]  # Start at the first location
+
+    def move(self, direction):
+        if direction in self.current_location.connections:
+            new_location_name = self.current_location.connections[direction]
+            self.current_location = self.locations[new_location_name]
+            return True
+        return False
+
+class Game:
+    def __init__(self):
+        self.font = pygame.font.Font(None, 36)
+        self.small_font = pygame.font.Font(None, 24)
+        self.world = World()
+        self.map_image = pygame.image.load(os.path.join("assets", "world_map.png"))
+        self.map_image = pygame.transform.scale(self.map_image, (SCREEN_WIDTH, SCREEN_HEIGHT))
+        self.question = ""
+        self.ai_response = ""
+        self.scroll_y = 0
+
+        try:
+            self.llm = Ollama(model="tinyllama")
+            self.qa_chain = LLMChain(
+                llm=self.llm,
+                prompt=PromptTemplate(
+                    input_variables=["location", "question"],
+                    template="You are a wise and mysterious dungeon master in a fantasy world. The party is currently in {location}. Respond to the following: {question}"
+                )
+            )
+        except Exception as e:
+            print(f"Failed to initialize AI: {e}")
+            self.qa_chain = None
+
+    def start_game(self):
+        self.show_opening_screen()
+        self.game_loop()
+
+    def show_opening_screen(self):
+        screen.blit(self.map_image, (0, 0))
+        text = self.font.render("Welcome to the Fantasy World", True, WHITE)
+        screen.blit(text, (SCREEN_WIDTH // 2 - text.get_width() // 2, SCREEN_HEIGHT - 50))
+        pygame.display.flip()
+        pygame.time.wait(3000)
+
+    def game_loop(self):
+        running = True
+        while running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_RETURN:
+                        self.process_input()
+                    elif event.key == pygame.K_BACKSPACE:
+                        self.question = self.question[:-1]
+                    else:
+                        self.question += event.unicode
+
+            screen.blit(self.map_image, (0, 0))
+            self.draw_game_state()
+            pygame.display.flip()
+
+        pygame.quit()
+        sys.exit()
+
+    def draw_game_state(self):
+        # Draw current location
+        location_text = self.font.render(f"Current Location: {self.world.current_location.name}", True, WHITE)
+        screen.blit(location_text, (10, 10))
+
+        # Draw question input
+        pygame.draw.rect(screen, WHITE, (10, SCREEN_HEIGHT - 50, SCREEN_WIDTH - 20, 40))
+        question_text = self.small_font.render(self.question, True, BLACK)
+        screen.blit(question_text, (15, SCREEN_HEIGHT - 45))
+
+        # Draw scrolling AI response
+        response_surface = pygame.Surface((SCREEN_WIDTH - 20, 200))
+        response_surface.fill(BLACK)
+        y = 0
+        for line in self.wrap_text(self.ai_response, 70):
+            text_surface = self.small_font.render(line, True, WHITE)
+            response_surface.blit(text_surface, (0, y))
+            y += 30
+        screen.blit(response_surface, (10, SCREEN_HEIGHT - 260), (0, self.scroll_y, SCREEN_WIDTH - 20, 200))
+
+        # Draw choices
+        y = SCREEN_HEIGHT - 300
+        for i, choice in enumerate(self.world.current_location.choices, 1):
+            choice_text = self.small_font.render(f"{i}. {choice}", True, WHITE)
+            screen.blit(choice_text, (15, y))
+            y += 30
+
+        # Scroll text
+        self.scroll_y = (self.scroll_y + 1) % max(y - 200, 1)
+
+    def process_input(self):
+        if self.question.lower().startswith("go "):
+            direction = self.question.lower().split()[1]
+            if self.world.move(direction):
+                self.ai_response = f"You travel {direction} to {self.world.current_location.name}. {self.world.current_location.description}"
+            else:
+                self.ai_response = f"You cannot go {direction} from here."
+        elif self.question.isdigit() and 1 <= int(self.question) <= len(self.world.current_location.choices):
+            choice = self.world.current_location.choices[int(self.question) - 1]
+            if self.qa_chain:
+                self.ai_response = self.qa_chain.run(location=self.world.current_location.name, question=choice)
+            else:
+                self.ai_response = f"You chose: {choice}"
+        elif self.qa_chain:
+            self.ai_response = self.qa_chain.run(location=self.world.current_location.name, question=self.question)
+        else:
+            self.ai_response = "The dungeon master is momentarily unavailable. Please try again later."
+
+        self.question = ""  # Clear the question after processing
+        self.scroll_y = 0  # Reset scroll position for new text
+
+    def wrap_text(self, text, max_chars):
+        words = text.split()
+        lines = []
+        current_line = ""
+        for word in words:
+            if len(current_line) + len(word) + 1 <= max_chars:
+                current_line += " " + word if current_line else word
+            else:
+                lines.append(current_line)
+                current_line = word
+        if current_line:
+            lines.append(current_line)
+        return lines
+
+if __name__ == "__main__":
+    game = Game()
+    game.start_game()
